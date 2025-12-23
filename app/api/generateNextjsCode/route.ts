@@ -3,15 +3,15 @@ import dedent from "dedent";
 import { z } from "zod";
 import { auth } from '@clerk/nextjs/server';
 
+// We point to Google's free Gemini API
 const openai = new OpenAI({
-  apiKey: process.env.LLM_API_KEY,
-  baseURL: process.env.LLM_BASE_URL,
+  apiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY,
+  baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
 });
 
 export async function POST(req: Request) {
-  // Check if user is authenticated
+  // 1. Keeps the login security
   const { userId } = await auth();
-
   if (!userId) {
     return new Response('Unauthorized', { status: 401 });
   }
@@ -19,7 +19,6 @@ export async function POST(req: Request) {
   const json = await req.json();
   const result = z
     .object({
-      model: z.string(),
       messages: z.array(
         z.object({
           role: z.enum(["user", "assistant"]),
@@ -33,11 +32,12 @@ export async function POST(req: Request) {
     return new Response(result.error.message, { status: 422 });
   }
 
-  const { model, messages } = result.data;
+  const { messages } = result.data;
   const systemPrompt = getSystemPrompt();
 
+  // 2. Uses Gemini 1.5 Flash (Fast and Free)
   const completionStream = await openai.chat.completions.create({
-    model,
+    model: "gemini-1.5-flash",
     messages: [
       {
         role: "system",
@@ -53,15 +53,16 @@ export async function POST(req: Request) {
       })),
     ],
     temperature: 0.2,
-    stream: true, // Enable streaming
+    stream: true, 
   });
 
+  // 3. This sends the text to your screen as it is generated
   const stream = new ReadableStream({
     async pull(controller) {
       for await (const chunk of completionStream) {
-        const text = chunk.choices[0].delta.content;
+        const text = chunk.choices[0]?.delta?.content;
         if (text) {
-          controller.enqueue(text);
+          controller.enqueue(new TextEncoder().encode(text));
         }
       }
       controller.close();
@@ -74,42 +75,14 @@ export async function POST(req: Request) {
 }
 
 function getSystemPrompt() {
-  return dedent(`
-    You are an expert Next.js and React engineer specializing in creating modern web applications. Your task is to generate code that strictly adheres to the following guidelines:
-
-    Next.js Specific Requirements:
-    - ALWAYS use Next.js 14+ with the App Router
-    - Structure code according to Next.js app directory conventions
-    - Use server and client components appropriately
-    - Leverage Next.js built-in optimizations (Image, Link components)
-    - Implement metadata for SEO
-    - Use TypeScript for type safety
-
-    Styling Requirements:
-    - ALWAYS use Tailwind CSS for styling
-    - Avoid arbitrary values in Tailwind classes
-    - Use a professional, consistent color palette
-    - Implement responsive design using Tailwind's responsive classes
-    - Ensure proper spacing and layout with margin/padding classes
-
-    Component Guidelines:
-    - Create self-contained, reusable components
-    - Use 'use client' directive for client-side interactivity
-    - Import React hooks directly from 'react'
-    - Handle error and loading states
-    - Ensure components are functional without required props
-
-    Additional Constraints:
-    - NO external libraries beyond Next.js and Tailwind
-    - Focus on clean, readable, and maintainable code
-    - Prioritize performance and user experience
-
-    Output Instructions:
-    - Return ONLY the Next.js component code
-    - Include all necessary imports
-    - Do NOT include code block markers
-    - Ensure the code is ready to be used in a Next.js project
-  `);
+  return dedent`
+    You are an expert Next.js and React engineer.
+    - ALWAYS use Next.js 14+ with App Router.
+    - ALWAYS use Tailwind CSS for styling.
+    - TypeScript for type safety.
+    - Return ONLY the Next.js component code.
+    - Do NOT include backticks (\`\`\`) or language names like "tsx".
+  `;
 }
 
 export const runtime = "edge";
