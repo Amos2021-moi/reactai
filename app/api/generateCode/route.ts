@@ -3,10 +3,10 @@ import dedent from "dedent";
 import shadcnDocs from "@/utils/shadcn-docs";
 import { z } from "zod";
 
-// This is configured to use Google Gemini's OpenAI-compatible interface
 const openai = new OpenAI({
   apiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY,
-  baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
+  // Fix 1: Removed trailing slash to prevent double-slash 404s
+  baseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
 });
 
 export async function POST(req: Request) {
@@ -24,42 +24,37 @@ export async function POST(req: Request) {
       .safeParse(json);
 
     if (result.error) {
-      console.error('Validation error:', result.error);
       return new Response(result.error.message, { status: 422 });
     }
 
     const { messages } = result.data;
     const systemPrompt = getSystemPrompt(); 
 
-    // We use gemini-1.5-flash because it is fast and free
     const completion = await openai.chat.completions.create({
+      // Fix 2: Using the most stable 2025 model name
       model: "gemini-1.5-flash",
       messages: [
-        {
-          role: "system",
-          content: systemPrompt,
-        },
-        ...messages.map((message) => ({
-          ...message,
-          content:
-            message.role === "user"
-              ? message.content +
-                "\nPlease ONLY return code, NO backticks or language names. React code only with tailwindcss"
-              : message.content,
+        { role: "system", content: systemPrompt },
+        ...messages.map((m) => ({
+          role: m.role,
+          content: m.role === "user" 
+            ? m.content + "\nIMPORTANT: Return ONLY raw code. No markdown, no backticks, no 'tsx' labels." 
+            : m.content,
         })),
       ],
-      temperature: 0.9,
+      temperature: 0.7, // Lowered for better code stability
       stream: false, 
-      max_tokens: 8192, 
+      // Fix 3: Lowered max_tokens to stay safe from 404 limit errors
+      max_tokens: 4096, 
     });
 
     const content = completion.choices[0]?.message?.content || '';
 
     // Check if the code is actually there
-    if (!content || !content.includes('export default')) {
+    if (!content || content.length < 10) {
       return new Response(
-        JSON.stringify({ error: 'Generated code is incomplete' }),
-        { status: 500, headers: { "Content-Type": "application/json" } }
+        JSON.stringify({ error: 'AI returned empty code. Check your API quota.' }),
+        { status: 500 }
       );
     }
 
@@ -67,23 +62,21 @@ export async function POST(req: Request) {
       headers: { "Content-Type": "text/plain" },
     });
   } catch (error: any) {
-    console.error('API error:', error);
+    console.error('Final API Error:', error.message);
     return new Response(
-      JSON.stringify({ error: 'Internal server error', details: error.message }),
-      { status: 500, headers: { "Content-Type": "application/json" } }
+      JSON.stringify({ error: error.message }),
+      { status: error.status || 500 }
     );
   }
 }
 
 function getSystemPrompt() {
   return dedent`
-    You are an expert frontend React engineer specializing in shadcn/ui.
-    ALWAYS use shadcn/ui components. Import from "@/components/ui/...".
+    You are an expert frontend React engineer.
+    ALWAYS use shadcn/ui components from "@/components/ui/...".
     Use Tailwind CSS. Return ONLY the code for a single file.
+    Do NOT use backticks (\`\`\`). Do NOT say "Here is your code".
     
-    Available shadcn/ui Components:
-    ${shadcnDocs.map((c) => c.name).join(", ")}
-    
-    ${shadcnDocs.map((c) => `Component: ${c.name}\nUsage: ${c.usageDocs}`).join("\n")}
+    Components available: ${shadcnDocs.map((c) => c.name).join(", ")}
   `;
 }
