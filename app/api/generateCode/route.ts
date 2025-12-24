@@ -3,80 +3,85 @@ import dedent from "dedent";
 import shadcnDocs from "@/utils/shadcn-docs";
 import { z } from "zod";
 
+// 1. Tell Vercel to allow this function to run for up to 60 seconds (max for Hobby)
+export const maxDuration = 60; 
+
 const openai = new OpenAI({
   apiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY,
-  // Fix 1: Removed trailing slash to prevent double-slash 404s
+  // Ensure the baseURL has NO trailing slash to avoid 404 double-slashes
   baseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
 });
 
 export async function POST(req: Request) {
   try {
     const json = await req.json();
-    const result = z
-      .object({
-        messages: z.array(
-          z.object({
-            role: z.enum(["user", "assistant"]),
-            content: z.string(),
-          }),
-        ),
-      })
-      .safeParse(json);
+    const result = z.object({
+      messages: z.array(z.object({
+        role: z.enum(["user", "assistant"]),
+        content: z.string(),
+      })),
+    }).safeParse(json);
 
-    if (result.error) {
-      return new Response(result.error.message, { status: 422 });
-    }
+    if (result.error) return new Response(result.error.message, { status: 422 });
 
     const { messages } = result.data;
-    const systemPrompt = getSystemPrompt(); 
 
-    const completion = await openai.chat.completions.create({
-      // Fix 2: Using the most stable 2025 model name
+    // 2. Request a STREAMING response from Gemini
+    const response = await openai.chat.completions.create({
       model: "gemini-1.5-flash",
       messages: [
-        { role: "system", content: systemPrompt },
+        { role: "system", content: getSystemPrompt() },
         ...messages.map((m) => ({
           role: m.role,
           content: m.role === "user" 
-            ? m.content + "\nIMPORTANT: Return ONLY raw code. No markdown, no backticks, no 'tsx' labels." 
+            ? m.content + "\nReturn ONLY raw React code. No markdown backticks." 
             : m.content,
         })),
       ],
-      temperature: 0.7, // Lowered for better code stability
-      stream: false, 
-      // Fix 3: Lowered max_tokens to stay safe from 404 limit errors
-      max_tokens: 4096, 
+      stream: true, // Crucial: Keeps the Vercel function alive
+      temperature: 0.7,
     });
 
-    const content = completion.choices[0]?.message?.content || '';
-
-    // Check if the code is actually there
-    if (!content || content.length < 10) {
-      return new Response(
-        JSON.stringify({ error: 'AI returned empty code. Check your API quota.' }),
-        { status: 500 }
-      );
-    }
-
-    return new Response(content, {
-      headers: { "Content-Type": "text/plain" },
+    // 3. Convert the OpenAI stream into a ReadableStream for the browser
+    const stream = new ReadableStream({
+      async start(controller) {
+        const encoder = new TextEncoder();
+        try {
+          for await (const chunk of response) {
+            const content = chunk.choices[0]?.delta?.content || "";
+            if (content) {
+              controller.enqueue(encoder.encode(content));
+            }
+          }
+        } catch (err) {
+          controller.error(err);
+        } finally {
+          controller.close();
+        }
+      },
     });
+
+    // Return the stream as plain text so the frontend can display it live
+    return new Response(stream, {
+      headers: { 
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-cache",
+      },
+    });
+
   } catch (error: any) {
-    console.error('Final API Error:', error.message);
-    return new Response(
-      JSON.stringify({ error: error.message }),
-      { status: error.status || 500 }
-    );
+    console.error("Streaming Error:", error.message);
+    return new Response(JSON.stringify({ error: error.message }), { status: 500 });
   }
 }
 
 function getSystemPrompt() {
   return dedent`
-    You are an expert frontend React engineer.
-    ALWAYS use shadcn/ui components from "@/components/ui/...".
-    Use Tailwind CSS. Return ONLY the code for a single file.
-    Do NOT use backticks (\`\`\`). Do NOT say "Here is your code".
+    You are an expert React engineer. 
+    Build a modern, responsive landing page using Tailwind CSS and shadcn/ui.
+    Import components from "@/components/ui/...".
+    Return ONLY the code for a single file. No explanations.
     
-    Components available: ${shadcnDocs.map((c) => c.name).join(", ")}
+    Available Components: ${shadcnDocs.map((c) => c.name).join(", ")}
   `;
 }
